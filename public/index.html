@@ -1,0 +1,174 @@
+<!doctype html>
+<!-- muj_sms UI: two views — student portal (course registration site) and the
+     DBMS console (actions / data / logs). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUJ SMS — student management</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="topbar">
+  <span id="app-name">MUJ SMS</span>
+  <nav id="view-switch" aria-label="View">
+    <button type="button" data-view="site">Student portal</button>
+    <button type="button" data-view="console" aria-pressed="true">DBMS console</button>
+  </nav>
+  <span id="db-status">checking</span>
+  <button id="btn-reset" type="button">Reset demo data</button>
+</header>
+
+<!-- ============ STUDENT PORTAL (registration site) ============ -->
+<div id="site-view" hidden>
+  <main id="site-main">
+    <section aria-labelledby="h-shop-course">
+      <h2 id="h-shop-course" class="step">1 · Choose course</h2>
+      <ol id="course-list"></ol>
+    </section>
+
+    <section aria-labelledby="h-shop-section">
+      <h2 id="h-shop-section" class="step">2 · Choose section</h2>
+      <p class="hint" id="section-legend"></p>
+      <div id="portal-sections" role="group" aria-label="Section picker"></div>
+      <p id="section-hint" class="hint">Full sections and sections of courses you already take are crossed out.</p>
+    </section>
+
+    <section aria-labelledby="h-shop-student">
+      <h2 id="h-shop-student" class="step">3 · Student and hostel</h2>
+      <label for="site-student">Student</label>
+      <select id="site-student"></select>
+
+      <details id="new-student">
+        <summary>New student</summary>
+        <label for="ns-name">Name</label>
+        <input id="ns-name" type="text" autocomplete="off">
+        <label for="ns-email">Email</label>
+        <input id="ns-email" type="email" autocomplete="off">
+        <label for="ns-phone">Phone (optional)</label>
+        <input id="ns-phone" type="text" autocomplete="off">
+        <button id="btn-add-student" type="button">Add student</button>
+        <p id="ns-error" class="error" role="alert"></p>
+      </details>
+
+      <label for="site-hostel">Hostel stay days (0 = none, 1&ndash;40) — 150.00 per day</label>
+      <input id="site-hostel" type="number" min="0" max="40" step="1" value="0">
+      <p id="pax-error" class="error" role="alert"></p>
+    </section>
+  </main>
+
+  <aside id="shop-side" aria-label="Checkout">
+    <h2 class="step">Checkout</h2>
+    <dl id="site-summary">
+      <dt>Course</dt><dd id="sum-course">—</dd>
+      <dt>Section</dt><dd id="sum-section">—</dd>
+      <dt>Course fee</dt><dd id="sum-fee">—</dd>
+      <dt>Hostel</dt><dd id="sum-hostel">—</dd>
+      <dt class="total">Total (INR)</dt><dd class="total" id="sum-total">—</dd>
+    </dl>
+    <button id="site-enroll" type="button" class="primary" disabled>Confirm enrollment</button>
+    <p id="site-error" class="error" role="alert"></p>
+
+    <div id="site-ticket" hidden>
+      <p class="eyebrow">Enrollment slip</p>
+      <h3>Enrollment confirmed</h3>
+      <div class="trow"><span>Enrollment</span><span id="tkt-id"></span></div>
+      <div class="trow"><span>Course</span><span id="tkt-course"></span></div>
+      <div class="trow"><span>Section</span><span id="tkt-section"></span></div>
+      <div class="trow"><span>Student</span><span id="tkt-student"></span></div>
+      <div class="trow"><span>Paid</span><span id="tkt-total"></span></div>
+      <p class="hint">One fee row (PAID). Triggers wrote the audit rows.</p>
+    </div>
+
+    <h2 class="step">Transaction trace</h2>
+    <ol id="site-trace-list" class="log-list" aria-label="Transaction trace"></ol>
+
+    <h2 class="step">My courses</h2>
+    <label for="site-courses-student">Student</label>
+    <select id="site-courses-student"></select>
+    <ol id="site-courses"></ol>
+    <p id="courses-error" class="error" role="alert"></p>
+  </aside>
+</div>
+
+<!-- ============ DBMS CONSOLE (teaching view) ============ -->
+<main id="layout">
+  <!-- LEFT: actions -->
+  <section id="col-actions" aria-label="Actions">
+    <h2>Enroll a student</h2>
+    <label for="course-select">Course</label>
+    <select id="course-select"></select>
+
+    <div id="section-map" role="group" aria-label="Section map"></div>
+    <p id="seat-hint">Crossed sections are full or already taken by this student. Click one to drop it.</p>
+
+    <label for="student-select">Student</label>
+    <select id="student-select"></select>
+
+    <label for="hostel-days">Hostel days (0 = none, 1&ndash;40)</label>
+    <input id="hostel-days" type="number" min="0" max="40" step="1" value="0">
+
+    <button id="btn-enroll" type="button" class="primary">Enroll student</button>
+
+    <label for="fail-at">Enroll with forced failure at</label>
+    <select id="fail-at">
+      <option value="">(no failure)</option>
+      <option value="enrollment">after enrollment</option>
+      <option value="fee">after fee</option>
+      <option value="hostel">after hostel</option>
+    </select>
+    <button id="btn-enroll-fail" type="button">Enroll with forced failure</button>
+    <button id="btn-drop" type="button" disabled>Drop enrollment</button>
+    <p id="book-error" class="error" role="alert"></p>
+
+    <h2>Concepts</h2>
+    <div class="concept-grid">
+      <button type="button" data-demo="fk">FK error</button>
+      <button type="button" data-demo="unique">UNIQUE error</button>
+      <button type="button" data-demo="check">CHECK error</button>
+      <button type="button" data-demo="trigger">Trigger error</button>
+    </div>
+    <button id="btn-isolation" type="button">Isolation demo (A vs B)</button>
+    <p id="concept-error" class="error" role="alert"></p>
+
+    <h2>Normalization</h2>
+    <div class="concept-grid">
+      <button type="button" data-norm="update">Update anomaly</button>
+      <button type="button" data-norm="insert">Insert anomaly</button>
+      <button type="button" data-norm="delete">Delete anomaly</button>
+    </div>
+    <p class="hint">Each button puts its anomaly query into the SQL box. Run it and compare.</p>
+  </section>
+
+  <!-- CENTER: data -->
+  <section id="col-data" aria-label="Data">
+    <nav id="table-tabs" aria-label="Database tables"></nav>
+    <div id="table-wrap"><table id="data-table"></table></div>
+    <p id="table-error" class="error" role="alert"></p>
+
+    <h2>SQL</h2>
+    <textarea id="sql-input" rows="4" spellcheck="false"
+      placeholder="SELECT * FROM enrollments LIMIT 10"></textarea>
+    <button id="btn-run" type="button" class="primary">Run query</button>
+    <p class="hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> also runs the query</p>
+    <p id="sql-error" class="error" role="alert"></p>
+    <div id="sql-result"><table id="sql-table"></table></div>
+  </section>
+
+  <!-- RIGHT: logs -->
+  <section id="col-logs" aria-label="Logs">
+    <nav id="log-tabs" aria-label="Logs">
+      <button type="button" data-log="audit" aria-pressed="true">Audit log</button>
+      <button type="button" data-log="general" aria-pressed="false">General log</button>
+      <button type="button" data-log="trace" aria-pressed="false">Transaction trace</button>
+    </nav>
+    <ol id="audit-list" class="log-list"></ol>
+    <ol id="general-list" class="log-list" hidden></ol>
+    <ol id="trace-list" class="log-list" hidden></ol>
+  </section>
+</main>
+
+<script src="app.js"></script>
+<script src="site.js"></script>
+</body>
+</html>
