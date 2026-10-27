@@ -1,0 +1,4 @@
+# Never commit real credentials or installed packages
+node_modules/
+.env
+npm-debug.log*

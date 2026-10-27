@@ -1,0 +1,15 @@
+{
+  "name": "muj-sms-rdbms-demo",
+  "version": "1.0.0",
+  "description": "Local teaching demo of RDBMS concepts (normalization, transactions, ACID, constraints, triggers, locking) with a student management system for Manipal University Jaipur.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "private": true,
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "mysql2": "^3.11.0"
+  }
+}
