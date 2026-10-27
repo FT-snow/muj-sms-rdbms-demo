@@ -1,0 +1,840 @@
+PROJECT_EXPLAINED.TXT -- MUJ SMS (student management system, RDBMS teaching demo)
+Prepared for Karan Singh Chandel (2502050920), Section G3, Manipal University
+Jaipur. Written for a student presenting this project to a teacher. Plain language.
+
+========================================================================
+A. OVERVIEW
+========================================================================
+
+MUJ SMS is a small course registration system for Manipal University Jaipur
+that runs completely on one computer. You click buttons in a browser, the
+browser talks to a Node.js server, the server runs SQL against a local MySQL 8
+database, and the screen shows the database changing live: tables, an audit
+log, MySQL's own query log, and the step-by-step trace of every transaction.
+
+The point of the project is not the registration UI. The point is to
+demonstrate, with real data that visibly changes:
+
+- relational design: normalization from an unnormalized table to 3NF
+- integrity: primary keys, foreign keys, UNIQUE, CHECK, NOT NULL, ENUM
+- transactions and ACID: BEGIN, COMMIT, ROLLBACK, atomicity, durability
+- concurrency: row locks with SELECT ... FOR UPDATE, lock waits
+- automation inside the database: triggers writing an audit log
+- logging: a trigger-based audit log versus MySQL's general query log
+
+Everything is visible: every SQL statement is written by hand in the code,
+and the app can even run raw SQL that you type.
+
+The system has two views, switched in the top bar. The student portal is what
+a student sees: courses, sections with live seat counts, checkout, enrollment
+slip, "My courses". The DBMS console is what the database is doing underneath:
+every table, the SQL box, the logs, the transaction traces. An enrollment made
+on the portal is the same transaction shown in the console.
+
+========================================================================
+B. DATABASE CONCEPTS (EXPLAINED COMPLETELY)
+========================================================================
+
+------------------------------------------------------------------------
+B1. Tables, primary keys, foreign keys, ON DELETE RESTRICT
+------------------------------------------------------------------------
+
+Definition. A table stores rows of one entity type. The PRIMARY KEY is the
+column (or columns) that uniquely identifies a row; it can never be NULL and
+never repeat. A FOREIGN KEY is a column that must contain a value that exists
+in another table's key column; the database enforces this itself.
+
+Why it matters. Keys are what make a relational database relational. They
+turn "some text that looks like a course code" into a checked reference, so
+an enrollment can never point at a course that does not exist.
+
+In this project. The clearest example is an enrollment:
+
+    CREATE TABLE enrollments (
+      enrollment_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      course_id     INT UNSIGNED NOT NULL,
+      section_id    INT UNSIGNED NOT NULL,
+      student_id    INT UNSIGNED NOT NULL,
+      status        ENUM('ENROLLED','DROPPED') NOT NULL DEFAULT 'ENROLLED',
+      created_at    DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+      CONSTRAINT fk_enrollment_course  FOREIGN KEY (course_id)  REFERENCES courses (course_id)   ON DELETE RESTRICT,
+      CONSTRAINT fk_enrollment_section FOREIGN KEY (section_id) REFERENCES sections (section_id) ON DELETE RESTRICT,
+      CONSTRAINT fk_enrollment_student FOREIGN KEY (student_id) REFERENCES students (student_id) ON DELETE RESTRICT
+    ) ENGINE = InnoDB;
+
+Line by line:
+- CREATE TABLE enrollments: makes a new table named enrollments.
+- enrollment_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY: the id column holds
+  whole numbers (INT UNSIGNED means no negatives), the database fills it
+  automatically 1, 2, 3 ... (AUTO_INCREMENT), and it is the primary key, so
+  every enrollment has a unique, non-NULL id.
+- course_id INT UNSIGNED NOT NULL: which course this enrollment is for; the
+  value cannot be empty (NOT NULL). It is a foreign key, see below.
+- section_id / student_id: same idea -- which teaching section and which student.
+- status ENUM('ENROLLED','DROPPED') NOT NULL DEFAULT 'ENROLLED': the column
+  may hold only those two strings; a new row that does not say otherwise gets
+  'ENROLLED'.
+- created_at DATETIME(3) ... DEFAULT CURRENT_TIMESTAMP(3): the database
+  stamps the insert time with millisecond precision by itself.
+- CONSTRAINT fk_enrollment_course FOREIGN KEY (course_id) REFERENCES courses
+  (course_id): MySQL must reject any enrollment whose course_id does not exist
+  in courses. It raises error 1452 if you try. Same for section and student.
+- ON DELETE RESTRICT: if someone tries to DELETE the parent row (the course,
+  the section, the student) while an enrollment still references it, MySQL
+  refuses with error 1451. Children cannot be orphaned.
+- ENGINE = InnoDB: InnoDB is the storage engine that provides transactions,
+  row locks and foreign keys. MyISAM, the old default, offers none of these.
+
+What the output looks like. Try the FK demo button (or type):
+    INSERT INTO courses (course_code, title, department_id, starts_at)
+    VALUES ('CSE999', 'Ghost Course', 999, '2026-12-01 08:00:00');
+Department 999 does not exist, so MySQL answers:
+    Error 1452: Cannot add or update a child row: a foreign key constraint
+    fails (`muj_sms`.`courses`, CONSTRAINT `fk_course_department`...)
+
+Say out loud: "Every enrollment points at a real course, section and student,
+and the database itself -- not my JavaScript -- refuses anything else,
+including deleting a parent that is still referenced."
+
+------------------------------------------------------------------------
+B2. Normalization: 1NF, 2NF, 3NF
+------------------------------------------------------------------------
+
+Definition. Normalization is a set of rules for splitting data into tables
+so that each fact is stored exactly once.
+
+- 1NF (First Normal Form): every column holds one atomic value; no lists
+  inside a cell, no repeating groups of columns.
+- 2NF (Second Normal Form): 1NF plus every non-key column depends on the
+  WHOLE key (matters when the key is composite).
+- 3NF (Third Normal Form): 2NF plus no non-key column depends on another
+  non-key column (no transitive dependencies).
+
+Why it matters. The unnormalized table shows the three classic anomalies:
+
+- UPDATE anomaly: the same fact stored in several rows -- change one copy and
+  the table contradicts itself.
+- INSERT anomaly: you cannot store a new fact (a course) until some unrelated
+  fact (a student) exists, because the columns are not nullable.
+- DELETE anomaly: deleting one row silently destroys an unrelated fact.
+
+The demo table. unnormalized_enrollments is one flat table:
+
+    CREATE TABLE unnormalized_enrollments (
+      unnorm_id       INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      enrollment_no   VARCHAR(10)   NOT NULL,
+      student_name    VARCHAR(120)  NOT NULL,
+      student_email   VARCHAR(200)  NOT NULL,
+      course_code     VARCHAR(8)    NOT NULL,
+      course_title    VARCHAR(150)  NOT NULL,
+      department_name VARCHAR(100)  NOT NULL,
+      section_no      VARCHAR(4)    NOT NULL,
+      fee             DECIMAL(10,2) NOT NULL,
+      fee_status      VARCHAR(20)   NOT NULL,
+      marks           VARCHAR(100)  NOT NULL DEFAULT ''
+    ) ENGINE = InnoDB;
+
+Student contact details, course title, department, section, fee, fee status
+and even the marks list are all in one row, repeated for every enrollment.
+The marks column holds '85,90' -- two scores in one cell, which already
+breaks 1NF.
+
+Anomaly 1 -- UPDATE anomaly (button "Update anomaly" loads this):
+    UPDATE unnormalized_enrollments
+    SET student_email = 'karan.chandel@newmail.com'
+    WHERE enrollment_no = 'EN-1001';
+Line by line: UPDATE names the table; SET assigns the new value to one
+column; WHERE picks the rows -- here exactly one enrollment. Karan Chandel
+has three rows. After this statement the table holds his new email on EN-1001
+and the old email on EN-1002 and EN-1003. Which one is true? Nobody knows.
+Then run:
+    SELECT student_name, student_email, enrollment_no
+    FROM unnormalized_enrollments
+    WHERE student_name = 'Karan Chandel';
+You see the contradiction on screen. In the 3NF design the email lives once,
+in students.email (UNIQUE), so there is exactly one place to change.
+
+Anomaly 2 -- INSERT anomaly (button "Insert anomaly"):
+    INSERT INTO unnormalized_enrollments
+      (enrollment_no, course_code, course_title, department_name, section_no,
+       fee, fee_status)
+    VALUES ('EN-1011', 'CSE301', 'Operating Systems',
+            'Computer Science and Engineering', 'G1', 45000.00, 'PENDING');
+Line by line: INSERT INTO names the table and the columns we are filling;
+VALUES gives one value per listed column. We did not list student_name or
+student_email because nobody has enrolled yet -- but those columns are NOT
+NULL, so MySQL refuses:
+    Error 1364: Field 'student_name' doesn't have a default value
+You literally cannot announce a new course in this table without inventing a
+student. In the 3NF design, courses is an independent table: the seed file
+inserts two courses before any enrollment exists.
+
+Anomaly 3 -- DELETE anomaly (button "Delete anomaly"):
+    DELETE FROM unnormalized_enrollments WHERE course_code = 'ECE101';
+Line by line: DELETE FROM names the table; WHERE picks the rows to remove.
+ECE101's title and department exist ONLY inside these rows. After the delete,
+the course facts and the fees of ECE101 are gone from the database even
+though the course itself still exists in the real world. In the 3NF design,
+enrollments reference courses by key; you can drop every enrollment of
+ECE101 and the course row survives.
+
+How each normal form fixes it, step by step (files sql/1nf.sql, sql/2nf.sql,
+sql/3nf.sql, each creates a view you can open as a tab):
+
+- 1NF view (enrollments_1nf): one row per exam score.
+      CREATE OR REPLACE VIEW enrollments_1nf AS
+      SELECT
+        u.enrollment_no, u.student_name, u.student_email,
+        u.course_code, u.course_title, u.department_name,
+        u.section_no, u.fee, u.fee_status,
+        n.n AS mark_no,
+        TRIM(SUBSTRING_INDEX(SUBSTRING_INDEX(u.marks, ',', n.n), ',', -1)) AS mark
+      FROM unnormalized_enrollments u
+      JOIN demo_numbers n
+        ON n.n <= IF(u.marks = '', 1,
+                     1 + LENGTH(u.marks) - LENGTH(REPLACE(u.marks, ',', '')));
+  Line by line: a VIEW is a saved SELECT, not a copy of data. SELECT lists
+  the flat columns plus mark_no (the position of the score) and mark (the
+  value). SUBSTRING_INDEX(u.marks, ',', n.n) keeps the first n pieces of the
+  list; the second SUBSTRING_INDEX with -1 takes the last of those, i.e. the
+  n-th piece; TRIM strips spaces. demo_numbers is a helper table holding
+  1..8. The JOIN condition says: repeat the enrollment row once per score it
+  lists (LENGTH minus LENGTH of the list with commas removed = number of
+  commas, plus 1 = number of scores; an empty list counts as one row with an
+  empty mark). Every cell is now atomic: 1NF.
+- 2NF views: courses_2nf holds each course's facts once
+  (SELECT DISTINCT course_code, course_title, department_name FROM
+  unnormalized_enrollments; -- DISTINCT collapses the repeats), and
+  enrollments_2nf keeps only enrollment facts. Each fact now sits with the
+  entity it belongs to.
+- 3NF views: students_3nf (one row per person with the email), courses_3nf
+  (title and department per course), enrollments_3nf (enrollment facts plus
+  references). No fact is stored in two places. The real muj_sms tables
+  (students, courses, sections, enrollments, fees, hostel_stays) are exactly
+  this shape, materialized with keys and constraints.
+
+Say out loud: "One fact, one place. The flat table contradicts itself when
+we change one row, refuses new courses, and loses courses when we delete the
+last enrollment -- the normalized tables fix all three."
+
+------------------------------------------------------------------------
+B3. Constraints: UNIQUE, CHECK, NOT NULL, ENUM and their error codes
+------------------------------------------------------------------------
+
+Definition. A constraint is a rule the database checks on every write,
+independent of any application code.
+
+In this project (button -> statement -> raw MySQL error):
+
+- FK: the courses demo insert above -> error 1452 (ER_NO_REFERENCED_ROW_2).
+- UNIQUE: email of a student is UNIQUE, so this fails:
+      INSERT INTO students (name, email, phone)
+      VALUES ('Demo Duplicate', 'karan.chandel@mail.com', NULL);
+  -> error 1062 (ER_DUP_ENTRY): Duplicate entry 'karan.chandel@mail.com' for
+  key 'students.email'. sections also has a composite UNIQUE:
+      UNIQUE (course_id, section_no)
+  -- the same section NUMBER may exist in two courses, but never twice in one
+  course. This is a two-column key: only the combination must be unique.
+- CHECK: hostel stay length is limited, and fees can never be negative:
+      days INT NOT NULL ... CONSTRAINT chk_days_range CHECK (days BETWEEN 1 AND 40)
+      CONSTRAINT chk_amount_nonneg CHECK (amount >= 0)
+      CONSTRAINT chk_capacity_range CHECK (capacity BETWEEN 5 AND 60)
+  The hostel demo inserts days = 50 -> error 3819
+  (ER_CHECK_CONSTRAINT_VIOLATED).
+- NOT NULL: demo columns that cannot be empty, e.g. unnormalized_enrollments.
+  student_name -> error 1364 when omitted with no default (and 1048 when you
+  explicitly try to store NULL).
+- ENUM: sections.slot only allows 'MORNING','EVENING'. Inserting 'NIGHT'
+  -> error 1265 (WARN_DATA_TRUNCATED): Data truncated for column 'slot'.
+
+Why it matters: the last line of defense is in the database. Any client --
+the app, a script, a DBA in a console -- gets the same refusal.
+
+Say out loud: "Integrity is not an application feature here; it is a
+property of the schema, and MySQL answers with numbered errors."
+
+------------------------------------------------------------------------
+B4. Transactions: BEGIN, COMMIT, ROLLBACK
+------------------------------------------------------------------------
+
+Definition. A transaction groups statements into one unit: either every
+statement in the group becomes permanent (COMMIT) or none of it ever happened
+(ROLLBACK). BEGIN starts it.
+
+The enrollment flow (POST /api/enroll) runs in ONE transaction, visible in
+the "Transaction trace" tab:
+
+    BEGIN
+    SELECT section_id, course_id, section_no, fee FROM sections
+    WHERE section_id = ? FOR UPDATE
+    INSERT INTO enrollments (course_id, section_id, student_id, status)
+    VALUES (?, ?, ?, 'ENROLLED')
+    INSERT INTO fees (enrollment_id, amount, status) VALUES (?, ?, 'PAID')
+    INSERT INTO hostel_stays (enrollment_id, days, fee) VALUES (?, ?, ?)
+    COMMIT
+
+Line by line:
+- BEGIN: open a transaction on this connection. Nothing after this is
+  visible to other connections until COMMIT.
+- SELECT ... FROM sections WHERE section_id = ? FOR UPDATE: read the section
+  row AND take an exclusive row lock on it. The ? is a placeholder -- the
+  driver sends the value separately, which is what prevents SQL injection.
+  FOR UPDATE matters because two registrations could be fighting for the last
+  seats of a section at the same moment; the second one waits here until the
+  first commits or rolls back (see B6).
+- INSERT INTO enrollments ...: write the enrollment row. The trigger
+  trg_enrollments_no_double (B7) checks the section's free seats and the
+  student's existing enrollments at this moment and aborts with SIGNAL 45000
+  if the section is full or the student already takes this course.
+- INSERT INTO fees ...: the money row, amount = the section fee we just read
+  with the lock held.
+- INSERT INTO hostel_stays ...: only if hostel days were given; fee is a
+  simple 150.00 per day.
+- COMMIT: make all of it permanent at once.
+
+The "Enroll with forced failure" button does exactly the same thing, but
+throws a deliberate error after one of the steps (enrollment / fee /
+hostel). The server then runs:
+
+    ROLLBACK
+
+and MySQL erases every uncommitted insert of that transaction. The trace
+shows ROLLBACK; the tables and even the audit log show nothing, because the
+trigger-written audit rows were part of the same transaction.
+
+Say out loud: "Enrollment, fee and hostel stay go in one unit. If any step
+fails, the database itself undoes the others -- zero partial rows."
+
+------------------------------------------------------------------------
+B5. ACID, each tied to one demo button
+------------------------------------------------------------------------
+
+- Atomicity -- all or nothing. Button: "Enroll with forced failure" (after
+  enrollment / after fee / after hostel). Evidence: trace shows ROLLBACK;
+  enrollments, fees, hostel_stays, audit_log all unchanged.
+- Consistency -- data always satisfies the rules. Buttons: FK / UNIQUE /
+  CHECK / Trigger errors. Evidence: MySQL refuses each illegal write with a
+  specific error code.
+- Isolation -- parallel work does not corrupt each other. Button:
+  "Isolation demo". Evidence: connection B freezes at LOCK WAIT while A holds
+  the row lock, then fails after A commits.
+- Durability -- once committed, it survives a crash. Demo: enroll a student,
+  stop Node (Ctrl-C), start it again (npm start), the enrollment is still
+  there. Evidence: the row is read back after restart. The commit had already
+  been written to InnoDB's redo log on disk before Node acknowledged it.
+
+Say out loud: "Each letter of ACID is one button in the left column."
+
+------------------------------------------------------------------------
+B6. Locking and isolation
+------------------------------------------------------------------------
+
+Definition. InnoDB locks rows, not whole tables. SELECT ... FOR UPDATE takes
+an exclusive (X) row lock; another transaction asking for the same row's
+lock waits until the holder commits or rolls back, or until
+innodb_lock_wait_timeout seconds pass (then error 1205).
+
+The isolation demo (POST /api/isolation-demo) runs two real connections:
+
+    Connection A: SET SESSION innodb_lock_wait_timeout = 5
+                  BEGIN
+                  SELECT section_no FROM sections WHERE section_id = ? FOR UPDATE
+                  INSERT INTO enrollments ... (NOT committed yet)
+    Connection B: the exact same enrollment attempt, one moment later
+                  -> B's SELECT ... FOR UPDATE blocks: A holds the lock
+    (while B waits, the server reads information_schema.INNODB_TRX and shows
+     B's trx_state = LOCK WAIT on screen -- proof, not a claim)
+    Connection A: COMMIT -> enrollment becomes visible, B unblocks
+    Connection B: the BEFORE INSERT trigger now SEES A's committed enrollment
+                  -> SIGNAL SQLSTATE '45000' -> B gets error 1644
+                  -> B's transaction ROLLBACKs
+
+Line by line: SET SESSION innodb_lock_wait_timeout = 5 limits THIS session's
+lock waits to 5 seconds so nothing can hang the demo. information_schema.
+INNODB_TRX is MySQL's live table of running InnoDB transactions;
+trx_mysql_thread_id is the connection id, which is how the demo finds B's
+row.
+
+The isolation level in use is InnoDB's default REPEATABLE READ. What it
+allows: other connections keep reading old committed data without waiting
+(consistent reads never block). What it prevents: dirty reads (reading
+uncommitted data) and non-repeatable reads (a row you read twice changing
+under you). Phantom-ish surprises are prevented here concretely by row
+locks: B cannot slip a second enrollment past A because B must take the same
+row lock before its insert, and the trigger re-check runs only after B gets
+that lock.
+
+Why the app locks at all if the trigger exists: the trigger's check and the
+insert are two separate steps; without the lock, two transactions can pass
+the check at the same instant and both insert (check-then-act race). The
+row lock makes the two steps effectively one.
+
+Say out loud: "A holds the lock, B is measurably in LOCK WAIT, A commits,
+and B's trigger -- now seeing A's enrollment -- rejects it with 45000."
+
+------------------------------------------------------------------------
+B7. Triggers
+------------------------------------------------------------------------
+
+Definition. A trigger is a small procedure the database executes
+automatically on every INSERT / UPDATE / DELETE of a table. Application code
+cannot forget to call it.
+
+This project has 11 triggers. Every audit trigger writes ONE audit_log row
+per changed row.
+
+1) trg_enrollments_no_double -- BEFORE INSERT on enrollments. Fires before
+the row is written. Full code:
+
+    CREATE TRIGGER trg_enrollments_no_double BEFORE INSERT ON enrollments
+    FOR EACH ROW
+    BEGIN
+      DECLARE capacity_count INT;
+      DECLARE enrolled_count INT;
+      IF NEW.status = 'ENROLLED' THEN
+        SELECT capacity INTO capacity_count FROM sections
+          WHERE section_id = NEW.section_id;
+        SELECT COUNT(*) INTO enrolled_count FROM enrollments
+          WHERE section_id = NEW.section_id AND status = 'ENROLLED';
+        IF enrolled_count >= capacity_count THEN
+          SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Section is FULL';
+        END IF;
+        IF EXISTS (
+          SELECT 1 FROM enrollments e
+          WHERE e.course_id = NEW.course_id AND e.student_id = NEW.student_id
+            AND e.status = 'ENROLLED'
+        ) THEN
+          SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Student already ENROLLED in this course';
+        END IF;
+      END IF;
+    END
+
+Line by line: BEFORE INSERT ON enrollments = run before every insert; FOR
+EACH ROW = once per attempted row; NEW is the row being inserted. DECLARE
+makes local variables for the trigger body. If the new enrollment is
+ENROLLED: the first SELECT ... INTO reads the section's capacity into a
+variable; the second counts the ENROLLED rows already in that section. If
+the count has reached capacity, SIGNAL SQLSTATE '45000' raises an error with
+MySQL's standard "application error" SQLSTATE; SET MESSAGE_TEXT supplies the
+human-readable message 'Section is FULL'. Then, IF EXISTS another ENROLLED
+row for the same student in the same course (EXISTS is true when the
+subquery returns at least one row -- the rule is one enrollment per course,
+whatever the section), a second SIGNAL rejects the insert with 'Student
+already ENROLLED in this course'. The insert -- and the whole surrounding
+transaction -- is aborted. Error seen by the client: errno 1644
+(ER_SIGNAL_EXCEPTION), SQLSTATE 45000.
+
+2) trg_enrollments_no_reenroll -- BEFORE UPDATE on enrollments. The same two
+guards for the case where a DROPPED enrollment is set back to ENROLLED: the
+capacity count excludes the row's own id (enrollment_id <> NEW.enrollment_id)
+and the duplicate-course check does too, so re-activating your own dropped
+row is allowed only if the section still has room and you did not enroll in
+the course again in the meantime.
+
+3) trg_enrollments_after_insert -- AFTER INSERT on enrollments:
+
+    INSERT INTO audit_log (table_name, action, row_id, old_data, new_data)
+    VALUES ('enrollments', 'INSERT', NEW.enrollment_id, NULL,
+            JSON_OBJECT('course_id', NEW.course_id, 'section_id', NEW.section_id,
+                        'student_id', NEW.student_id, 'status', NEW.status))
+
+Line by line: fires after the row is actually stored; JSON_OBJECT builds a
+JSON document from key/value pairs -- the after-image of the row; old_data
+is NULL because there was no old row. Trigger-written audit rows live inside
+the same transaction: if the enrollment rolls back, its audit rows vanish
+too (visible with the forced-failure button).
+
+4) trg_enrollments_after_update -- AFTER UPDATE on enrollments. Writes action
+'UPDATE' with old_data = JSON_OBJECT('status', OLD.status) and new_data =
+JSON_OBJECT('status', NEW.status). OLD is the row before the change, NEW
+after. This is what makes a drop visible in the audit log.
+
+5) trg_enrollments_after_delete -- AFTER DELETE on enrollments. Writes
+'DELETE' with the old row's facts and NULL new_data.
+
+6) trg_fees_after_insert -- AFTER INSERT on fees. Logs enrollment_id, amount,
+status. This is why a completed enrollment shows TWO audit rows (enrollment
++ fee), three with a hostel stay.
+
+7) trg_fees_after_update -- AFTER UPDATE on fees. Logs the void of a fee:
+status PAID -> FAILED when an enrollment is dropped.
+
+8) trg_hostel_after_insert -- AFTER INSERT on hostel_stays. Logs days and
+fee. (Added so an enrollment with a hostel stay produces exactly three audit
+rows.)
+
+9) trg_hostel_after_delete -- AFTER DELETE on hostel_stays. Logs the removed
+stay.
+
+10) trg_sections_after_insert -- AFTER INSERT on sections. Logs the new
+section.
+11) trg_sections_after_update -- AFTER UPDATE on sections. Logs fee changes
+(old_data/new_data with the fee).
+
+All audit triggers share this shape: single INSERT INTO audit_log statement,
+NEW.* for inserts, OLD.* + NEW.* for updates, OLD.* for deletes. The
+audit_log table itself:
+
+    CREATE TABLE audit_log (
+      log_id     BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      table_name VARCHAR(64) NOT NULL,
+      action     ENUM('INSERT','UPDATE','DELETE') NOT NULL,
+      row_id     BIGINT UNSIGNED NOT NULL,
+      old_data   JSON NULL,
+      new_data   JSON NULL,
+      logged_at  DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+    ) ENGINE = InnoDB;
+
+Say out loud: "The audit trail is written by the database engine itself --
+even if application code changes, every row-level change is still logged."
+
+------------------------------------------------------------------------
+B8. Logs: audit_log (trigger-based) vs the general query log
+------------------------------------------------------------------------
+
+- audit_log is APPLICATION-level history, written by triggers. It stores the
+  meaning of each change: which table, which action, which row, the before
+  and after images as JSON, millisecond timestamp. It is small and permanent
+  until you clear it. Read it in the "Audit log" tab or:
+      SELECT log_id, table_name, action, row_id, old_data, new_data, logged_at
+      FROM audit_log WHERE log_id > ? ORDER BY log_id DESC LIMIT 100
+- The general query log is SERVER-level traffic. MySQL writes every statement
+  it receives -- every SELECT, INSERT, BEGIN, COMMIT -- with a timestamp and
+  the connecting user. It is switched off by default (it grows fast). Enable:
+      SET GLOBAL log_output = 'TABLE';
+      SET GLOBAL general_log = 'ON';
+  Then read the mysql.general_log table (demo step 8):
+      SELECT event_time, user_host, command_type,
+             CAST(argument AS CHAR CHARACTER SET utf8mb4) AS argument
+      FROM mysql.general_log
+      WHERE user_host LIKE 'root%' AND argument NOT LIKE '%general_log%'
+      ORDER BY event_time DESC, thread_id DESC LIMIT 30
+  Line by line: event_time is when MySQL received the statement; user_host
+  says who connected; command_type is Query / Connect / Quit; argument is
+  the statement text (CAST turns the stored bytes into readable text);
+  WHERE keeps only this app's user and hides the log-reading queries
+  themselves so the log does not fill with its own polling; ORDER BY shows
+  the newest first.
+- The difference in one line: audit_log answers "what rows changed and what
+  did they look like", the general log answers "what SQL did the server
+  receive, from whom, and when". The audit log is chosen, structured and
+  transactional; the general log is everything, raw, and independent of
+  transactions (it shows statements from transactions that later rolled
+  back).
+
+Say out loud: "Two different layers of logging: triggers log business
+changes, MySQL's general log logs every statement the server receives."
+
+------------------------------------------------------------------------
+B9. Indexes (created automatically by PK / UNIQUE / FK)
+------------------------------------------------------------------------
+
+Definition. An index is a sorted structure (a B-tree in InnoDB) that lets
+MySQL find rows by key without scanning the whole table.
+
+Why it matters here. You never wrote CREATE INDEX, yet indexes exist:
+
+- every PRIMARY KEY is automatically the table's clustered index (the table
+  data itself is stored in primary-key order);
+- every UNIQUE constraint (students.email, courses.course_code,
+  uq_course_section (course_id, section_no), fees.enrollment_id) is backed by
+  a unique index -- that index is also HOW MySQL detects duplicates instantly
+  when enforcing error 1062;
+- every FOREIGN KEY gets an index on its columns (visible as KEY
+  fk_enrollment_section (section_id) etc. in SHOW CREATE TABLE enrollments)
+  because FK checks must find parent/child rows quickly.
+
+Demonstrate in a MySQL console with:
+    SHOW CREATE TABLE enrollments;
+and point at the KEY lines. (The app's SQL box deliberately only allows
+SELECT / INSERT / UPDATE / DELETE, so run SHOW in the console.) Also: the
+double-enrollment guard's count query WHERE section_id = ... AND
+status = 'ENROLLED' is fast because enrollments has the fk_enrollment_section
+index on section_id.
+
+Say out loud: "Keys and constraints are not just rules -- the database
+builds indexes to enforce them efficiently."
+
+------------------------------------------------------------------------
+B10. Seed and reset statements
+------------------------------------------------------------------------
+
+seed.sql is idempotent -- it can run on a fresh database or on one full of
+demo leftovers, and always ends in the same state. How:
+
+    SET FOREIGN_KEY_CHECKS = 0
+    TRUNCATE TABLE audit_log, hostel_stays, fees, enrollments, students,
+                   sections, courses, departments,
+                   unnormalized_enrollments, demo_numbers
+    SET FOREIGN_KEY_CHECKS = 1
+    (then the fixed INSERTs for departments, courses, sections, students,
+     enrollments + fees + hostel stays, unnormalized rows, numbers 1..8)
+    TRUNCATE TABLE audit_log
+
+Line by line: TRUNCATE empties a table AND resets its AUTO_INCREMENT
+counters, which is why demo ids stay small after a reset. TRUNCATE is
+refused on a parent table that a foreign key references, even when the
+child table is empty, so the seed temporarily sets FOREIGN_KEY_CHECKS = 0
+for this session only, truncates parents and children together, and turns
+the checks straight back on. The final TRUNCATE audit_log removes the rows
+the INSERT triggers wrote during seeding, so the audience sees only demo
+activity in the log.
+
+The "Reset demo data" button (POST /api/reset) runs exactly this seed.sql
+on a dedicated connection, then also clears the server-side log:
+
+    TRUNCATE TABLE mysql.general_log
+
+so the general-log demo starts empty too. It needs a separate connection
+because seed.sql is many statements at once and the app's own pool is
+configured to reject multi-statement text (a second defense behind the
+/api/query verb check).
+
+========================================================================
+C. FRONTEND AND BACKEND (CONCEPTS ONLY)
+========================================================================
+
+Tools and libraries actually used:
+- Node.js -- runs JavaScript on the server, serves the API and the static
+  files. Chosen because it is in the course stack and needs no extra runtime.
+- Express (npm) -- minimal HTTP router; maps URL paths to handler functions
+  and serves the public/ folder. Chosen because it is ~10 lines of setup.
+- mysql2 (npm, promise API) -- MySQL driver; sends parameterized SQL and
+  speaks the MySQL protocol. Chosen because mysql (the older driver) lacks a
+  clean promise API and mysql2 is its maintained successor.
+- dotenv (npm) -- reads .env into process.env so credentials are not in code.
+- VS Code -- editor used while writing; no plugins are required for this
+  project. MySQL Workbench (or the mysql CLI) is only needed to apply
+  schema.sql / seed.sql; either works.
+
+Concepts used, one line each:
+- REST API -- the server exposes resources (/api/courses, /api/enroll, ...)
+  where method + path + JSON body describe the action.
+- JSON -- the data format for every request and response body.
+- fetch() -- the browser's built-in way to make HTTP calls from JavaScript.
+- Polling with setInterval -- the page calls the API every 2 seconds and
+  re-renders changed rows with a 150ms flash; simple and robust for a demo.
+- Connection pool (mysql2 createPool, limit 5) -- reuses open MySQL
+  connections instead of opening one per request; transactions borrow one
+  connection and always give it back in finally.
+- Parameterized queries -- values are sent as data, never pasted into the SQL
+  text, which is the standard defense against SQL injection. The only
+  endpoint accepting raw SQL text validates it first (single statement,
+  SELECT/INSERT/UPDATE/DELETE only, table viewer names whitelisted).
+- Whitelisting -- /api/table/:name looks the table up in a fixed map of
+  pre-written SELECTs; anything not in the map is refused.
+- Environment variables -- DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, PORT come
+  from .env; .env is git-ignored, .env.example documents the names.
+- CSS custom properties (design tokens) -- palette, fonts and spacing are
+  defined once in :root of style.css, so the whole look lives in one place.
+- Static file serving -- express.static serves public/ (index.html,
+  style.css, app.js) so the browser can load the UI.
+
+Two frontend views share one API (switch with the top-bar buttons):
+- Student portal (site.js): a real registration flow -- course list with the
+  cheapest fee and free-seat count, section buttons with live occupancy
+  (full sections and courses the student already takes are crossed out),
+  student signup (POST /api/students, where the UNIQUE(email) constraint
+  rejects duplicates with error 1062), a checkout whose Confirm button fires
+  the same POST /api/enroll one-transaction endpoint and renders its trace
+  next to the button, an enrollment slip read back from committed rows
+  (GET /api/enrollments?student_id=), and "My courses" with Drop
+  (POST /api/drop/:id).
+- DBMS console (app.js): the teaching view described in this file.
+
+An enrollment made on the portal is the same transaction shown in the
+console: enroll on the portal, switch to the console, and the new row, the
+audit log entries and the general log are all there.
+
+How everything is connected:
+
+    browser                      Node.js server                 MySQL 8
+    +-------------------+        +---------------------+        +------------------+
+    | index.html        | fetch  | Express routes      | SQL    | muj_sms tables   |
+    | app.js (poll 2s)  | -----> | /api/enroll ...     | -----> | triggers fire    |
+    | site.js, style.css| <----- | mysql2 pool (5 conns)| <----- | audit_log grows  |
+    +-------------------+  JSON  +---------------------+        +------------------+
+                                       ^                                   |
+                                       +----------- polled back -----------+
+
+Request path of one enrollment (click -> committed row):
+1. Click "Enroll student" in the console, or "Confirm enrollment" on the
+   portal -- both POST /api/enroll with {course_id, section_id, student_id,
+   hostel_days}.
+2. Express route validates the numbers, borrows a connection from the pool.
+3. BEGIN; SELECT ... FOR UPDATE locks the section row.
+4. INSERT enrollment; the BEFORE INSERT trigger re-checks capacity and the
+   one-enrollment-per-course rule.
+5. AFTER INSERT trigger writes an audit_log row. Same for fee and hostel.
+6. COMMIT. The response carries the trace (BEGIN ... COMMIT with timestamps).
+7. The next 2-second poll reads enrollments (new row flashes) and audit_log
+   (new entries at the top).
+
+Run it locally in five steps:
+1. Install MySQL 8 and Node.js 18+.
+2. npm install
+3. mysql -u root -p < schema.sql   then   mysql -u root -p < seed.sql
+4. cp .env.example .env, set DB_USER / DB_PASSWORD.
+5. npm start and open http://localhost:3001
+
+========================================================================
+D. DEMO SCRIPT (what to click, what to say, what the teacher sees)
+========================================================================
+
+Step 1 -- The problem: one flat table.
+Click: the tab "unnormalized_enrollments" (center). Then the three buttons
+under "Normalization" (Update / Insert / Delete anomaly), pressing "Run
+query" for each loaded query. Say: "Everything about an enrollment is copied
+into one row -- even the marks as a comma list." Teacher sees: the update
+leaves Karan with two different emails; the insert is refused (error 1364);
+the delete wipes out ECE101's course facts.
+
+Step 2 -- The fix: 3NF tables.
+Click: tabs "enrollments", "sections", "students", "courses". Optionally run
+sql/1nf.sql, sql/2nf.sql, sql/3nf.sql before the demo and show the three
+view tabs. Say: "Each fact lives with the entity it belongs to; references
+are checked keys." Teacher sees: small clean tables, no repeated facts.
+
+Step 3 -- An enrollment, atomically, with an audit trail.
+Click: course CSE201, a section this student is NOT in, a student, hostel
+days 10, "Enroll student". Say: "One transaction: lock, enrollment, fee,
+hostel stay, commit -- and the database itself logs every row." Teacher
+sees: transaction trace BEGIN ... COMMIT with timestamps; enrollments tab
+flashes one new row; audit log shows 3 trigger rows (enrollments INSERT,
+fees INSERT, hostel_stays INSERT). The portal does the same through a
+real registration flow -- switch views to show both.
+
+Step 4 -- Atomicity under failure.
+Click: another free section, "Enroll with forced failure: after fee". Say:
+"Same transaction, forced error before COMMIT." Teacher sees: trace ends in
+ROLLBACK; enrollments/fees/hostel_stays/audit_log all unchanged -- zero
+partial rows.
+
+Step 5 -- Constraints = consistency.
+Click: FK error, UNIQUE error, CHECK error, Trigger error. Say: "The
+database refuses bad data with numbered errors; my app cannot bypass this."
+Teacher sees: 1452 (foreign key), 1062 (duplicate email), 3819 (hostel days
+range), 1644 with SQLSTATE 45000 (student already enrolled / section full).
+
+Step 6 -- Locking = isolation.
+Click: a free section, then "Isolation demo (A vs B)". Say: "A locks the
+section row and holds an uncommitted enrollment; B must wait; A commits;
+B's trigger now sees A's enrollment and rejects it." Teacher sees the trace:
+A BEGIN -> A lock -> A INSERT -> B BEGIN -> B LOCK WAIT (with the
+information_schema.INNODB_TRX evidence) -> A COMMIT -> B error 1644 ->
+B ROLLBACK.
+
+Step 7 -- Durability.
+Do: enroll a student, press Ctrl-C in the terminal, run npm start again,
+reload the page. Say: "COMMIT already wrote to InnoDB's log on disk."
+Teacher sees: the enrollment is still there.
+
+Step 8 -- Server-level log.
+Type in the SQL box:
+    SELECT event_time, command_type,
+           CAST(argument AS CHAR CHARACTER SET utf8mb4) AS argument
+    FROM mysql.general_log
+    ORDER BY event_time DESC, thread_id DESC LIMIT 30;
+(or just open the "General log" tab). Say: "MySQL itself recorded every
+statement -- including the BEGIN and COMMIT of our transactions." Teacher
+sees: the raw statements with timestamps, newest first.
+
+========================================================================
+E. LIKELY TEACHER QUESTIONS
+========================================================================
+
+Q1. Why 3NF and not BCNF or higher?
+A. 3NF removes update/insert/delete anomalies for this data; BCNF matters
+when a table has several overlapping candidate keys. None of these tables
+has a non-trivial dependency of that kind, so 3NF is already BCNF here --
+I can show that every determinant is a key.
+
+Q2. What happens if the server crashes mid-transaction?
+A. The connection dies, MySQL never received COMMIT, so InnoDB rolls the
+transaction back from its undo log on startup. The audience-visible state
+was never wrong because uncommitted work is invisible to other sessions.
+
+Q3. Difference between the audit log and the general query log?
+A. The audit log is trigger-written, structured (table, action, row, before
+and after JSON) and transactional -- rolled back rows leave no audit trail.
+The general log is MySQL's own raw record of every received statement, with
+no structure and no link to transaction outcomes.
+
+Q4. Why InnoDB and not MyISAM?
+A. InnoDB provides transactions (BEGIN/COMMIT/ROLLBACK), row-level locking
+and foreign keys. MyISAM has none of these; the whole demo would not exist.
+
+Q5. What is a deadlock, and could one happen here?
+A. Two transactions each holding a lock the other needs. MySQL detects the
+cycle and kills one with error 1213. In this demo every transaction locks
+exactly one section row in the same order (section first, then inserts), so
+there is no second lock to wait on -- a deadlock would need two locks taken
+in different orders.
+
+Q6. Why is the trigger check not enough -- why also SELECT FOR UPDATE?
+A. The trigger's count and the INSERT are two steps. Two transactions can
+pass the check at the same instant (both see seats left) and both insert,
+overfilling the section. The row lock serializes the check+insert pair so
+the second transaction's check runs only after the first commits.
+
+Q7. How do you stop a student enrolling twice in the same course?
+A. The BEFORE INSERT trigger checks for an existing ENROLLED row with the
+same student and course and raises SIGNAL 45000. A plain UNIQUE(student_id,
+course_id) index would not be enough, because a DROPPED row must not block
+re-enrollment; the trigger only looks at ENROLLED rows.
+
+Q8. Why do enrollment ids skip numbers during the demo (5, then 7)?
+A. AUTO_INCREMENT ids are consumed even by INSERTs that later roll back --
+atomicity removes the ROWS, not the counter. After "Reset demo data" the
+seed uses TRUNCATE, which resets the counters, so ids are small again.
+
+Q9. Is the raw SQL box a SQL injection hole?
+A. It is deliberately a teaching feature, and it is guarded: one statement
+only, verbs restricted to SELECT/INSERT/UPDATE/DELETE, nothing else reaches
+MySQL. The app's real endpoints never concatenate values into SQL -- they
+use ? placeholders. It exists so you can watch the server log your statements.
+
+Q10. Where is the "one row per change" rule enforced?
+A. In the AFTER triggers: each fires FOR EACH ROW and inserts exactly one
+audit_log row with the row's primary key, so a multi-row UPDATE would
+produce one audit row per changed row.
+
+========================================================================
+F. CHANGELOG
+========================================================================
+
+2026-10-27
+- Added project scaffolding: package.json, .gitignore, .env.example
+  (dotenv, express, mysql2 dependencies).
+- Added schema.sql: muj_sms database, 3NF tables (departments, courses,
+  sections, students, enrollments, fees, hostel_stays, audit_log,
+  unnormalized_enrollments, demo_numbers), FK ON DELETE RESTRICT, CHECK /
+  UNIQUE / ENUM constraints, and 11 triggers (double-enrollment and section
+  capacity guards with SIGNAL 45000, audit rows on enrollments/fees/
+  hostel_stays/sections).
+- Added seed.sql: idempotent demo data (3 departments, 2 courses, 12
+  sections, 6 students, 4 enrollments, 10 unnormalized rows), audit log
+  cleared at the end so the demo starts clean.
+- Added server: Express API (db.js pool + whitelist; server.js routes):
+  enrollment transaction with trace and forced-failure rollback, drop
+  transaction, constraint demos (FK/UNIQUE/CHECK/trigger), two-connection
+  isolation demo with LOCK WAIT evidence, whitelisted table viewer, guarded
+  raw SQL endpoint, audit log polling, general log reading, reset endpoint.
+- Added web UI (public/): student portal and DBMS console views. Console:
+  three-column layout, section map with X-marked full/taken sections and
+  aria-labels, 2s polling with 150ms row flash, SQL box, audit/general/
+  trace log tabs, concept and normalization demo buttons, inline errors.
+  Portal: course list with fees and free capacity, section occupancy
+  picker, student signup, checkout calling the same POST /api/enroll
+  transaction with its trace shown beside the button, enrollment slip read
+  back from committed rows via GET /api/enrollments, and "My courses" with
+  drop.
+- Added sql/1nf.sql, sql/2nf.sql, sql/3nf.sql: 1NF/2NF/3NF walk-through
+  views over unnormalized_enrollments.
+- Added README.md and this PROJECT_EXPLAINED.txt.
+- Verified end to end against MySQL 8.0.46: all 8 demo steps, forced
+  rollback leaving zero partial rows, constraint error codes 1452 / 1062 /
+  3819 / 1644, isolation demo B failing with 1644 after A commits, and
+  durability across a server restart.
