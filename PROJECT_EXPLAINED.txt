@@ -592,6 +592,498 @@ because seed.sql is many statements at once and the app's own pool is
 configured to reject multi-statement text (a second defense behind the
 /api/query verb check).
 
+------------------------------------------------------------------------
+B11. THE COMPLETE SCHEMA, LINE BY LINE (schema.sql)
+------------------------------------------------------------------------
+
+This is schema.sql from top to bottom, every line explained. Use it as the
+reading companion when the teacher says "open schema.sql and explain it".
+
+The file header (comments):
+
+    -- schema.sql: creates the muj_sms database, all 3NF tables,
+    -- constraints and triggers.
+    -- Run once before seed.sql (it drops and recreates the whole database):
+    --   mysql -u root -p < schema.sql
+    -- NOTE: triggers below use DELIMITER because their bodies contain ';'
+    -- plain `mysql < schema.sql` handles that; run this file only via the
+    -- mysql CLI.
+
+- Lines beginning with -- are comments; the mysql client skips them.
+- The third comment is the exact command that runs the file: the mysql
+  client reads the file and executes its statements in order.
+
+    DROP DATABASE IF EXISTS muj_sms;
+
+- DROP DATABASE deletes the database and every table in it.
+- IF EXISTS prevents an error on a fresh machine where it does not exist
+  yet. WHY first: it makes the script re-runnable -- running it twice can
+  never leave a stale old table behind.
+
+    CREATE DATABASE muj_sms CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+- CREATE DATABASE creates an empty database.
+- CHARACTER SET utf8mb4: text is stored as full Unicode (4-byte UTF-8, so
+  names in any script are safe; the older 3-byte utf8 is not).
+- COLLATE utf8mb4_unicode_ci: the string comparison rules; _ci means
+  case-insensitive, so 'Karan@Mail.com' equals 'karan@mail.com' in UNIQUE
+  checks and WHERE comparisons.
+
+    USE muj_sms;
+
+- USE makes every following statement run inside this database, without a
+  muj_sms. prefix on each table name.
+
+TABLE 1: departments
+
+    CREATE TABLE departments (
+      department_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      code          CHAR(3)      NOT NULL UNIQUE,
+      name          VARCHAR(100) NOT NULL
+    ) ENGINE = InnoDB;  -- InnoDB: transactions, row locks and foreign keys
+
+Line by line:
+- CREATE TABLE departments ( ... ): defines a new table named departments;
+  inside the brackets, every line declares one column or one constraint.
+- department_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY: the identifier
+  column. INT = 32-bit whole number. UNSIGNED = no negative values (ids
+  never need to be negative; this doubles the positive range).
+  AUTO_INCREMENT = MySQL assigns 1, 2, 3 ... automatically when an INSERT
+  omits the column. PRIMARY KEY = the unique row identifier: never NULL,
+  never duplicated; InnoDB physically stores the table sorted by this
+  column (the clustered index). It is a "surrogate" key -- meaningless to
+  the business, it only identifies the row.
+- code CHAR(3) NOT NULL UNIQUE: CHAR(3) = fixed width, exactly three
+  characters -- right for department codes like 'CSE' (every value the
+  same length, fast to compare). NOT NULL = required. UNIQUE = a second
+  'CSE' is rejected with error 1062. This is the business key, the value
+  humans use.
+- name VARCHAR(100) NOT NULL: VARCHAR = variable-length text up to 100
+  characters; only the bytes actually used are stored, unlike CHAR.
+- ) ENGINE = InnoDB;: picks the storage engine. InnoDB provides
+  transactions, row locks and foreign keys; the old default MyISAM offers
+  none of these. The trailing comment documents WHY InnoDB.
+
+TABLE 2: courses
+
+    CREATE TABLE courses (
+      course_id     INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      course_code   VARCHAR(8)   NOT NULL UNIQUE,  -- business key, human-readable
+      title         VARCHAR(150) NOT NULL,
+      department_id INT UNSIGNED NOT NULL,
+      starts_at     DATETIME     NOT NULL,
+      CONSTRAINT fk_course_department FOREIGN KEY (department_id) REFERENCES departments (department_id) ON DELETE RESTRICT
+    ) ENGINE = InnoDB;
+
+Line by line:
+- course_id ... PRIMARY KEY: the same surrogate auto-increment id pattern.
+- course_code VARCHAR(8) NOT NULL UNIQUE: the human-readable code
+  ('CSE201'). VARCHAR because course codes vary in length; UNIQUE so a
+  second CSE201 is impossible (error 1062).
+- title VARCHAR(150) NOT NULL: the required course name.
+- department_id INT UNSIGNED NOT NULL: which department owns the course.
+  As a plain column it means nothing yet -- the CONSTRAINT line below
+  turns it into a foreign key. NOT NULL because a course without a
+  department is meaningless in this model.
+- starts_at DATETIME NOT NULL: date plus time of the course start. DATETIME
+  stores wall-clock time without timezone conversion (fine for a local
+  demo).
+- CONSTRAINT fk_course_department FOREIGN KEY (department_id) REFERENCES
+  departments (department_id): names the constraint (fk_ =
+  table_relation convention), declares department_id as a foreign key
+  pointing at departments.department_id. From now on MySQL refuses any
+  department_id that does not exist (error 1452) -- referential integrity,
+  enforced by the database.
+- ON DELETE RESTRICT: deleting a department that courses still reference
+  is refused with error 1451. The parent cannot vanish while children
+  exist. (The alternatives would be CASCADE -- delete the children too --
+  or SET NULL; RESTRICT is the safe choice for a registration system.)
+
+TABLE 3: sections
+
+    CREATE TABLE sections (
+      section_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      course_id  INT UNSIGNED NOT NULL,
+      section_no VARCHAR(4)   NOT NULL,              -- 'G1' .. 'G6'
+      slot       ENUM('MORNING','EVENING') NOT NULL,
+      capacity   INT NOT NULL,
+      fee        DECIMAL(10,2) NOT NULL,             -- DECIMAL, not FLOAT: exact money
+      CONSTRAINT uq_course_section UNIQUE (course_id, section_no),
+      CONSTRAINT chk_capacity_range CHECK (capacity BETWEEN 5 AND 60),
+      CONSTRAINT fk_section_course FOREIGN KEY (course_id) REFERENCES courses (course_id) ON DELETE RESTRICT
+    ) ENGINE = InnoDB;
+
+Line by line:
+- section_id ... PRIMARY KEY: the surrogate id again.
+- course_id INT UNSIGNED NOT NULL: which course this section teaches (the
+  FK line below enforces it).
+- section_no VARCHAR(4) NOT NULL: the label 'G1' .. 'G6'; VARCHAR because
+  it mixes a letter and a digit.
+- slot ENUM('MORNING','EVENING') NOT NULL: ENUM = the column may hold ONLY
+  the listed strings; anything else is refused (error 1265 for an invalid
+  value). Internally MySQL stores the tiny integer 1 or 2, so ENUM is
+  compact. It is a constraint disguised as a data type.
+- capacity INT NOT NULL: how many students the section can hold. The CHECK
+  below bounds it.
+- fee DECIMAL(10,2) NOT NULL: exact fixed-point money -- up to 10 digits
+  total, 2 of them after the decimal point (max 99,999,999.99). WHY not
+  FLOAT/DOUBLE: those are binary approximations in which 0.1 is not exactly
+  representable, so money arithmetic drifts. DECIMAL stores digits
+  exactly; 45000.00 stays 45000.00.
+- CONSTRAINT uq_course_section UNIQUE (course_id, section_no): a COMPOSITE
+  UNIQUE over two columns. Neither column alone is unique -- 'G1' exists
+  in every course -- but the PAIR (course 1, 'G1') must be unique. This is
+  what makes a section identifiable. Violation: error 1062.
+- CONSTRAINT chk_capacity_range CHECK (capacity BETWEEN 5 AND 60): a CHECK
+  constraint is a boolean rule every row must satisfy. BETWEEN is
+  inclusive: a section of 4 or 61 seats is nonsense here, so it is refused
+  (error 3819). The university's room rule lives in the schema.
+- CONSTRAINT fk_section_course ... ON DELETE RESTRICT: sections point at a
+  real course; a course that still has sections cannot be deleted.
+
+TABLE 4: students
+
+    CREATE TABLE students (
+      student_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      name       VARCHAR(120) NOT NULL,
+      email      VARCHAR(200) NOT NULL UNIQUE,  -- one email = one student record
+      phone      VARCHAR(20)  NULL              -- NULL means "not given"
+    ) ENGINE = InnoDB;
+
+- student_id ... PRIMARY KEY: the surrogate id.
+- name VARCHAR(120) NOT NULL: the required display name.
+- email VARCHAR(200) NOT NULL UNIQUE: the business key of a person. NOT
+  NULL + UNIQUE together mean every student has exactly one email and no
+  two students share one. The signup endpoint relies on this: a duplicate
+  email is rejected by MySQL (1062), not by JavaScript.
+- phone VARCHAR(20) NULL: explicitly nullable -- a missing phone is
+  "unknown", which is different from an empty string. NULL is the honest
+  modeling choice, and the column comment says so.
+
+TABLE 5: enrollments (the worked example of B1)
+
+    CREATE TABLE enrollments (
+      enrollment_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      course_id     INT UNSIGNED NOT NULL,
+      section_id    INT UNSIGNED NOT NULL,
+      student_id    INT UNSIGNED NOT NULL,
+      status        ENUM('ENROLLED','DROPPED') NOT NULL DEFAULT 'ENROLLED',
+      created_at    DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),  -- ms precision for log ordering
+      CONSTRAINT fk_enrollment_course  FOREIGN KEY (course_id)  REFERENCES courses (course_id)   ON DELETE RESTRICT,
+      CONSTRAINT fk_enrollment_section FOREIGN KEY (section_id) REFERENCES sections (section_id) ON DELETE RESTRICT,
+      CONSTRAINT fk_enrollment_student FOREIGN KEY (student_id) REFERENCES students (student_id) ON DELETE RESTRICT
+    ) ENGINE = InnoDB;
+
+New things here (everything else is explained line by line in B1):
+- status ENUM('ENROLLED','DROPPED') ... DEFAULT 'ENROLLED': two legal
+  values, and INSERTs that omit status get 'ENROLLED' automatically. A
+  drop never deletes the row -- it flips the status, so history stays.
+- created_at DATETIME(3) ... DEFAULT CURRENT_TIMESTAMP(3): the (3) is
+  millisecond precision, needed because the demo orders events by time.
+  DEFAULT CURRENT_TIMESTAMP(3) = the database stamps the row at INSERT
+  time -- no application clock involved (one less way to be wrong).
+- Three foreign keys, one per reference: course, section, student. Each
+  would raise 1452 on a bad value and each blocks deletion of its parent
+  (1451).
+
+TABLE 6: fees
+
+    CREATE TABLE fees (
+      fee_id        INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      enrollment_id INT UNSIGNED NOT NULL UNIQUE,
+      amount        DECIMAL(10,2) NOT NULL,
+      status        ENUM('PAID','FAILED') NOT NULL DEFAULT 'PAID',
+      paid_at       DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+      CONSTRAINT fk_fee_enrollment FOREIGN KEY (enrollment_id) REFERENCES enrollments (enrollment_id) ON DELETE RESTRICT,
+      CONSTRAINT chk_amount_nonneg CHECK (amount >= 0)
+    ) ENGINE = InnoDB;
+
+New things:
+- enrollment_id INT UNSIGNED NOT NULL UNIQUE: a column that is a foreign
+  key AND unique at once -- that combination IS the one-to-one
+  relationship. One enrollment can have at most one fee row; a second is
+  refused (1062). The FK answers "does the parent exist?", UNIQUE adds
+  "at most one child".
+- status ENUM('PAID','FAILED') ... DEFAULT 'PAID': voiding a fee after a
+  drop sets FAILED; the row is never deleted, so the audit history
+  survives.
+- CONSTRAINT chk_amount_nonneg CHECK (amount >= 0): no negative fees,
+  enforced by the database itself (error 3819).
+
+TABLE 7: hostel_stays
+
+    CREATE TABLE hostel_stays (
+      stay_id       INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      enrollment_id INT UNSIGNED NOT NULL,
+      days          INT NOT NULL,
+      fee           DECIMAL(10,2) NOT NULL,
+      CONSTRAINT fk_stay_enrollment FOREIGN KEY (enrollment_id) REFERENCES enrollments (enrollment_id) ON DELETE RESTRICT,
+      CONSTRAINT chk_days_range     CHECK (days BETWEEN 1 AND 40)
+    ) ENGINE = InnoDB;
+
+New things:
+- No UNIQUE on enrollment_id, on purpose: an enrollment may have SEVERAL
+  stays -- a one-to-many relationship, unlike fees' one-to-one.
+- days INT NOT NULL + CHECK (days BETWEEN 1 AND 40): BETWEEN is inclusive
+  -- 1 to 40 days; 0 and 50 are refused (3819). The hostel rule lives in
+  the schema, not in a form validator.
+
+TABLE 8: audit_log
+
+    CREATE TABLE audit_log (
+      log_id     BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      table_name VARCHAR(64) NOT NULL,
+      action     ENUM('INSERT','UPDATE','DELETE') NOT NULL,
+      row_id     BIGINT UNSIGNED NOT NULL,          -- PK value of the changed row
+      old_data   JSON NULL,                         -- before-image; NULL for INSERT
+      new_data   JSON NULL,                         -- after-image; NULL for DELETE
+      logged_at  DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+    ) ENGINE = InnoDB;
+
+New things:
+- log_id BIGINT UNSIGNED ...: BIGINT = 64-bit integer; the audit log grows
+  forever, so it gets the bigger type (and its id space can never be
+  confused with the tables' INT ids).
+- table_name VARCHAR(64): which table changed. A text label, NOT a foreign
+  key -- on purpose: audit rows must survive even if a table is renamed or
+  dropped.
+- action ENUM('INSERT','UPDATE','DELETE'): exactly one of the three.
+- row_id BIGINT UNSIGNED NOT NULL: the primary key of the changed row, so
+  each audit entry can be joined back to the row it describes.
+- old_data JSON NULL / new_data JSON NULL: JSON is a native column type --
+  MySQL validates the text is well-formed JSON and lets queries reach
+  inside it (new_data->>'$.status'). old_data is the BEFORE image (NULL
+  for inserts, because there was no before), new_data the AFTER image
+  (NULL for deletes). Both NULL cannot happen by trigger design.
+- No foreign keys on this table, on purpose: an audit trail is append-only
+  and independent of the tables it describes.
+
+TABLE 9: unnormalized_enrollments (the teaching anti-pattern)
+
+    CREATE TABLE unnormalized_enrollments (
+      unnorm_id       INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      enrollment_no   VARCHAR(10)   NOT NULL,        -- NOT NULL on purpose: it makes the
+      student_name    VARCHAR(120)  NOT NULL,        --   insert anomaly demo fail loudly
+      student_email   VARCHAR(200)  NOT NULL,
+      course_code     VARCHAR(8)    NOT NULL,
+      course_title    VARCHAR(150)  NOT NULL,
+      department_name VARCHAR(100)  NOT NULL,
+      section_no      VARCHAR(4)    NOT NULL,
+      fee             DECIMAL(10,2) NOT NULL,
+      fee_status      VARCHAR(20)   NOT NULL,
+      marks           VARCHAR(100)  NOT NULL DEFAULT ''  -- '85,90' or ''
+    ) ENGINE = InnoDB;
+
+- Every fact of the enrollment AND of the student AND of the course is
+  copied into one row: that repetition is the update anomaly, the NOT NULL
+  columns without defaults are the insert anomaly, and course facts that
+  exist only here are the delete anomaly (all demonstrated in B2).
+- marks VARCHAR(100) NOT NULL DEFAULT '': the 1NF violation -- a LIST of
+  exam scores ('85,90') inside one cell. DEFAULT '' allows enrollments
+  without marks. The 1NF view splits this column into rows (B2).
+- fee_status is VARCHAR(20), not an ENUM -- the flat table lacks even the
+  type-level protections the real tables have. Part of the lesson.
+
+TABLE 10: demo_numbers
+
+    CREATE TABLE demo_numbers (
+      n INT UNSIGNED PRIMARY KEY
+    ) ENGINE = InnoDB;
+
+- One column, which is itself the primary key: the numbers 1..8. This is a
+  "tally table", the standard SQL trick for splitting a list into rows:
+  JOIN the list column against these numbers and take the n-th piece with
+  SUBSTRING_INDEX. Used only by the 1NF view (B2).
+
+THE TRIGGERS (11 of them)
+
+First, the DELIMITER mechanic, used by all of them:
+
+    DELIMITER ;;
+    ...trigger body, which contains ; inside...
+    END;;
+    DELIMITER ;
+
+- DELIMITER ;; tells the mysql CLIENT "statements now end with ;;, not ;".
+  WHY: a trigger body contains ordinary ';' characters (the SELECT, the IF
+  lines). Without the swap, the client would cut the CREATE TRIGGER at the
+  first ';' and MySQL would see a broken statement. After END;;,
+  DELIMITER ; restores the normal separator. DELIMITER is a client command,
+  not SQL -- which is why schema.sql must be run through the mysql CLI.
+
+Trigger 1: trg_enrollments_no_double (the business rules)
+
+    CREATE TRIGGER trg_enrollments_no_double BEFORE INSERT ON enrollments
+    FOR EACH ROW
+    BEGIN
+      DECLARE capacity_count INT;
+      DECLARE enrolled_count INT;
+      IF NEW.status = 'ENROLLED' THEN
+        SELECT capacity INTO capacity_count FROM sections
+          WHERE section_id = NEW.section_id;
+        SELECT COUNT(*) INTO enrolled_count FROM enrollments
+          WHERE section_id = NEW.section_id AND status = 'ENROLLED';
+        IF enrolled_count >= capacity_count THEN
+          SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Section is FULL';
+        END IF;
+        IF EXISTS (
+          SELECT 1 FROM enrollments e
+          WHERE e.course_id = NEW.course_id AND e.student_id = NEW.student_id
+            AND e.status = 'ENROLLED'
+        ) THEN
+          SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Student already ENROLLED in this course';
+        END IF;
+      END IF;
+    END;;
+
+- CREATE TRIGGER <name> BEFORE INSERT ON enrollments: fires before every
+  INSERT into enrollments is applied. BEFORE means it can abort the write;
+  AFTER (used below for audit) means the row is already stored.
+- FOR EACH ROW: runs once per affected row -- an INSERT of 3 rows fires it
+  3 times.
+- BEGIN ... END: a compound block, needed because the body holds more than
+  one statement.
+- DECLARE capacity_count INT; / DECLARE enrolled_count INT;: local
+  variables of the trigger body, one for the section's capacity, one for
+  the number of students already in it.
+- NEW is the row being inserted (OLD is the before-image in UPDATE/DELETE
+  triggers). NEW.status reads the incoming value.
+- SELECT capacity INTO capacity_count FROM sections WHERE section_id =
+  NEW.section_id: SELECT ... INTO runs a query and stores its single
+  result INTO a variable -- here the capacity of the section being joined.
+- SELECT COUNT(*) INTO enrolled_count ...: counts the ENROLLED rows
+  already in that section and stores the number.
+- IF enrolled_count >= capacity_count THEN SIGNAL ...: >= because the
+  section is full when the count has REACHED capacity -- the new student
+  would be number capacity + 1. SIGNAL SQLSTATE '45000' raises an error
+  from inside the database (45000 is the SQL standard's "unhandled
+  user-defined exception" class; MySQL surfaces it as error 1644,
+  ER_SIGNAL_EXCEPTION). SET MESSAGE_TEXT supplies the human-readable
+  message the client sees.
+- IF EXISTS (SELECT 1 FROM enrollments e WHERE e.course_id = NEW.course_id
+  AND e.student_id = NEW.student_id AND e.status = 'ENROLLED') THEN SIGNAL
+  ...: the second rule -- one enrollment per course. EXISTS is TRUE when
+  the subquery returns at least one row; SELECT 1 is convention -- we test
+  existence, not values. It looks at the COURSE (course_id), not just the
+  section, so switching sections of the same course is also refused. A
+  plain UNIQUE(student_id, course_id) index would NOT be enough, because a
+  DROPPED row must not block re-enrollment -- the trigger only counts
+  ENROLLED rows.
+- END IF closes each IF; END closes the BEGIN block.
+- WHY a trigger instead of app code: it runs inside the same transaction
+  as the insert, no client can bypass it (console, script, anything), and
+  it doubles as the isolation demo's proof (B6).
+
+Trigger 2: trg_enrollments_no_reenroll (the same rules for UPDATE)
+
+    CREATE TRIGGER trg_enrollments_no_reenroll BEFORE UPDATE ON enrollments
+    FOR EACH ROW
+    BEGIN
+      DECLARE capacity_count INT;
+      DECLARE enrolled_count INT;
+      IF NEW.status = 'ENROLLED' AND OLD.status <> 'ENROLLED' THEN
+        SELECT capacity INTO capacity_count FROM sections
+          WHERE section_id = NEW.section_id;
+        SELECT COUNT(*) INTO enrolled_count FROM enrollments
+          WHERE section_id = NEW.section_id AND status = 'ENROLLED'
+            AND enrollment_id <> NEW.enrollment_id;
+        IF enrolled_count >= capacity_count THEN
+          SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section is FULL';
+        END IF;
+        IF EXISTS (
+          SELECT 1 FROM enrollments e
+          WHERE e.course_id = NEW.course_id AND e.student_id = NEW.student_id
+            AND e.status = 'ENROLLED' AND e.enrollment_id <> NEW.enrollment_id
+        ) THEN
+          SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Student already ENROLLED in this course';
+        END IF;
+      END IF;
+    END;;
+
+- BEFORE UPDATE ON enrollments: fires before an UPDATE is applied.
+- NEW.status = 'ENROLLED' AND OLD.status <> 'ENROLLED': react only when an
+  update MOVES a row into ENROLLED (from DROPPED). Ordinary updates of an
+  already-enrolled row pass through.
+- enrollment_id <> NEW.enrollment_id: exclude the row being updated from
+  both checks -- otherwise it would count ITSELF (capacity check) or find
+  ITSELF (duplicate check) and always abort. This closes the loophole of
+  re-activating a dropped enrollment onto a full section or onto a course
+  the student took again in the meantime.
+
+Trigger 3: trg_enrollments_after_insert (audit)
+
+    CREATE TRIGGER trg_enrollments_after_insert AFTER INSERT ON enrollments
+    FOR EACH ROW
+      INSERT INTO audit_log (table_name, action, row_id, old_data, new_data)
+      VALUES ('enrollments', 'INSERT', NEW.enrollment_id, NULL,
+              JSON_OBJECT('course_id', NEW.course_id, 'section_id', NEW.section_id,
+                          'student_id', NEW.student_id, 'status', NEW.status));;
+
+- AFTER INSERT: fires after the row is actually stored -- if the insert
+  failed, no audit row exists.
+- The body is a single statement, so BEGIN/END is not required.
+- The INSERT writes the audit row INSIDE the same transaction as the
+  enrollment: if the transaction rolls back, the audit row vanishes with
+  it. The audit trail only ever describes committed reality.
+- JSON_OBJECT('key', value, ...): builds a JSON document from pairs -- the
+  after-image of the new enrollment, stored in new_data.
+- old_data = NULL: nothing existed before an INSERT.
+
+Trigger 4: trg_enrollments_after_update (audit)
+
+    CREATE TRIGGER trg_enrollments_after_update AFTER UPDATE ON enrollments
+    FOR EACH ROW
+      INSERT INTO audit_log (table_name, action, row_id, old_data, new_data)
+      VALUES ('enrollments', 'UPDATE', NEW.enrollment_id,
+              JSON_OBJECT('status', OLD.status),
+              JSON_OBJECT('status', NEW.status));;
+
+- OLD = the row BEFORE the update, NEW = after. Both images are stored, so
+  an ENROLLED -> DROPPED flip leaves evidence of what the row used to be.
+- Only 'status' is captured because it is the only column that changes in
+  this app; more columns would mean more JSON pairs.
+
+Trigger 5: trg_enrollments_after_delete (audit)
+
+    CREATE TRIGGER trg_enrollments_after_delete AFTER DELETE ON enrollments
+    FOR EACH ROW
+      INSERT INTO audit_log (table_name, action, row_id, old_data, new_data)
+      VALUES ('enrollments', 'DELETE', OLD.enrollment_id,
+              JSON_OBJECT('course_id', OLD.course_id, 'section_id', OLD.section_id,
+                          'student_id', OLD.student_id, 'status', OLD.status),
+              NULL);;
+
+- AFTER DELETE: the row is already gone, only OLD still exists -- the
+  before-image is preserved and new_data is NULL.
+
+Triggers 6 to 11 (fees, hostel_stays, sections) repeat the shapes above
+with different tables and JSON pairs; line by line they are the
+trigger-3/4/5 pattern, one audit row per changed row, same transactional
+behavior:
+
+    trg_fees_after_insert     AFTER INSERT ON fees -> logs enrollment_id,
+        amount, status as the after-image (a full enrollment = 2 audit rows)
+    trg_fees_after_update     AFTER UPDATE ON fees -> logs the void:
+        old_data {status: PAID}, new_data {status: FAILED}
+    trg_hostel_after_insert   AFTER INSERT ON hostel_stays -> logs
+        enrollment_id, days, fee (so an enrollment with a stay writes
+        exactly 3 audit rows)
+    trg_hostel_after_delete   AFTER DELETE ON hostel_stays -> logs the
+        removed stay's before-image
+    trg_sections_after_insert AFTER INSERT ON sections -> logs course_id,
+        section_no, slot, fee (seeding fires these; reset clears the noise)
+    trg_sections_after_update AFTER UPDATE ON sections -> logs the fee
+        change, old and new
+
+Say out loud: "Ten of the eleven triggers are bookkeeping -- one audit row
+per row-level change, written inside the same transaction. The eleventh,
+the BEFORE INSERT guard, is two business rules the database enforces:
+section capacity and one enrollment per course. Both kinds are invisible
+to application code and cannot be bypassed."
+
 ========================================================================
 C. FRONTEND AND BACKEND (CONCEPTS ONLY)
 ========================================================================
@@ -910,3 +1402,10 @@ F. CHANGELOG
   (trace + flash + trigger rows + raw SQL + general log), the complete list
   of plugins/extensions (three npm packages, none else), and why no ORM or
   frontend framework was used.
+- Added section B11 to PROJECT_EXPLAINED.txt (doc-only): the complete
+  schema.sql explained line by line -- DROP/CREATE DATABASE/USE, every
+  column of all 10 tables (types, UNSIGNED, CHAR vs VARCHAR, ENUM,
+  DECIMAL vs FLOAT, JSON, composite UNIQUE, FK ON DELETE RESTRICT, CHECK),
+  the DELIMITER mechanic, and all 11 triggers with their full code and
+  line-by-line explanations, including DECLARE / SELECT ... INTO and both
+  SIGNAL guards in the capacity trigger.
