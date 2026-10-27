@@ -801,6 +801,69 @@ A. In the AFTER triggers: each fires FOR EACH ROW and inserts exactly one
 audit_log row with the row's primary key, so a multi-row UPDATE would
 produce one audit row per changed row.
 
+Q11. How did you set up this console?
+A. The console is three static files (index.html, style.css, app.js) served
+by the same Express server -- no framework, no build tools. Every table you
+see is a real HTML table built by JavaScript: every 2 seconds the page calls
+GET /api/table/<name>, the server runs a whitelisted SELECT from the
+TABLE_SQL map in db.js, and the browser re-renders the rows. Rows that
+changed since the last poll get a 150ms background flash -- my diff against
+the previous poll, so a flash means the row genuinely changed in MySQL. The
+SQL box posts to /api/query, which validates the statement (single statement,
+only SELECT/INSERT/UPDATE/DELETE) and returns raw rows or the raw MySQL
+error. Table names are whitelisted so the endpoint cannot be pointed at
+mysql.user, and every error is JSON {ok:false, code, message} -- which is
+why errors appear inline, never as popups.
+
+Q12. Where is the backend running?
+A. On this same machine, as a Node.js process started with npm start,
+listening on port 3001 -- that is why the browser URL is localhost:3001.
+Inside the process, Express maps the routes and every database access goes
+through one mysql2 connection pool of 5 connections. MySQL itself runs on
+the same host and the pool connects to it at 127.0.0.1:3306 with credentials
+from a .env file that is git-ignored (only .env.example with placeholders is
+committed). So the full path is: browser -> Express on localhost:3001 ->
+mysql2 pool -> MySQL on 127.0.0.1. Nothing is hosted anywhere. Transactions
+borrow one dedicated connection from the pool and always release it in
+finally.
+
+Q13. Show me tables getting updated -- is that real or simulated?
+A. Real, and provable in three steps. Enroll a student: (1) the Transaction
+trace tab shows the exact SQL in order -- BEGIN, SELECT ... FOR UPDATE,
+INSERT enrollments, INSERT fees, COMMIT -- with timestamps; (2) the
+enrollments tab flashes one new row, which means the JSON of that row
+differs from the previous poll; (3) the Audit log tab gains three
+trigger-written rows. Then, to prove it is not a UI trick, run the same
+query in the SQL box: SELECT enrollment_id, status FROM enrollments WHERE
+enrollment_id = 5 -- the row is in MySQL regardless of my UI. And the
+General log tab is mysql.general_log, MySQL's own record of the statements
+it received -- the database is the witness, not my code. For the reverse:
+the forced-failure button ends in ROLLBACK and the same SELECT shows zero
+partial rows.
+
+Q14. Were there any plugins, extensions or extra tools?
+A. Almost none -- that was a deliberate constraint. Three npm packages
+total: express (HTTP router + static file serving), mysql2 (MySQL driver
+with a promise API, pool, parameterized queries) and dotenv (loads .env into
+process.env so credentials stay out of code). No frontend framework, no
+bundler, no CSS framework, no icon library, no ORM. No VS Code extension is
+required to build or run this. No MySQL plugins: triggers, CHECK constraints,
+ENUM, JSON columns, SELECT ... FOR UPDATE, information_schema.INNODB_TRX and
+mysql.general_log are all built into MySQL 8 Community Server, and the schema
+was applied with the plain mysql CLI. No browser extensions either -- the UI
+is vanilla JS with native fetch and setInterval. The logic lives in MySQL --
+triggers, constraints, locks -- not in npm packages.
+
+Q15. Why no ORM (Sequelize/Prisma) and no React for the UI?
+A. Because the point was to show the SQL itself: every query is hand-written
+and visible in the code, so the exact SELECT ... FOR UPDATE can be read in
+server.js during the viva -- an ORM would hide precisely the thing being
+demonstrated. React would add a build step and far more code for a single
+page whose logic is polling and a few buttons; getElementById and fetch
+cover it. mysql2 over the older mysql package because it is maintained and
+has a clean promise API, so the code is async/await instead of nested
+callbacks. Nothing was installed globally beyond Node.js, npm and MySQL 8.
+
 ========================================================================
 F. CHANGELOG
 ========================================================================
@@ -838,3 +901,12 @@ F. CHANGELOG
   rollback leaving zero partial rows, constraint error codes 1452 / 1062 /
   3819 / 1644, isolation demo B failing with 1644 after A commits, and
   durability across a server restart.
+
+2026-10-27
+- Updated PROJECT_EXPLAINED.txt only (no code change): added viva Q&A
+  Q11-Q15 -- how the console is set up (static files + 2s polling from a
+  whitelisted SELECT map), where the backend runs (Node on localhost:3001,
+  pool of 5, MySQL on 127.0.0.1), how to prove table updates are real
+  (trace + flash + trigger rows + raw SQL + general log), the complete list
+  of plugins/extensions (three npm packages, none else), and why no ORM or
+  frontend framework was used.
