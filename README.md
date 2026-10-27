@@ -3,8 +3,7 @@
 A small local web app demonstrating normalization (1NF-3NF), transactions,
 ACID, constraints, triggers, locking/isolation and database logs on MySQL 8,
 modeled on course registration at Manipal University Jaipur. The audience
-watches the database change live while the presenter runs actions or raw SQL
--- via a student portal and a DBMS console view.
+watches the database change live -- via a student portal and a DBMS console.
 
 ## Prerequisites
 
