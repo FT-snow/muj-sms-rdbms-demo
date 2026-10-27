@@ -15,7 +15,7 @@ Node.js 18+, npm, MySQL 8 (local), a user that can create databases.
     mysql -u root -p < schema.sql      # drops and recreates the muj_sms DB
     mysql -u root -p < seed.sql        # idempotent demo data
     cp .env.example .env               # set DB_USER / DB_PASSWORD
-    npm start                          # http://localhost:3001
+    npm start                          # http://localhost:3002
 
 Optional normalization walk-through (adds view tabs in the UI):
 `mysql -u root -p muj_sms < sql/1nf.sql` and the same for `sql/2nf.sql`,

@@ -1169,7 +1169,7 @@ Run it locally in five steps:
 2. npm install
 3. mysql -u root -p < schema.sql   then   mysql -u root -p < seed.sql
 4. cp .env.example .env, set DB_USER / DB_PASSWORD.
-5. npm start and open http://localhost:3001
+5. npm start and open http://localhost:3002
 
 ========================================================================
 D. DEMO SCRIPT (what to click, what to say, what the teacher sees)
@@ -1309,12 +1309,12 @@ why errors appear inline, never as popups.
 
 Q12. Where is the backend running?
 A. On this same machine, as a Node.js process started with npm start,
-listening on port 3001 -- that is why the browser URL is localhost:3001.
+listening on port 3002 -- that is why the browser URL is localhost:3002.
 Inside the process, Express maps the routes and every database access goes
 through one mysql2 connection pool of 5 connections. MySQL itself runs on
 the same host and the pool connects to it at 127.0.0.1:3306 with credentials
 from a .env file that is git-ignored (only .env.example with placeholders is
-committed). So the full path is: browser -> Express on localhost:3001 ->
+committed). So the full path is: browser -> Express on localhost:3002 ->
 mysql2 pool -> MySQL on 127.0.0.1. Nothing is hosted anywhere. Transactions
 borrow one dedicated connection from the pool and always release it in
 finally.
@@ -1397,7 +1397,7 @@ F. CHANGELOG
 2026-10-27
 - Updated PROJECT_EXPLAINED.txt only (no code change): added viva Q&A
   Q11-Q15 -- how the console is set up (static files + 2s polling from a
-  whitelisted SELECT map), where the backend runs (Node on localhost:3001,
+  whitelisted SELECT map), where the backend runs (Node on localhost:3002,
   pool of 5, MySQL on 127.0.0.1), how to prove table updates are real
   (trace + flash + trigger rows + raw SQL + general log), the complete list
   of plugins/extensions (three npm packages, none else), and why no ORM or
