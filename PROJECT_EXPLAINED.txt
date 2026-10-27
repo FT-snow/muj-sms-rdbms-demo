@@ -1356,6 +1356,39 @@ cover it. mysql2 over the older mysql package because it is maintained and
 has a clean promise API, so the code is async/await instead of nested
 callbacks. Nothing was installed globally beyond Node.js, npm and MySQL 8.
 
+Q16. Where exactly is the database? Prove everything runs on this machine.
+A. MySQL runs as a Windows SERVICE on this laptop, and every part of the
+stack is a process on this one machine. Proof chain, in the order I would
+show it:
+  1. The service: Windows runs MySQL as service MySQL80. In PowerShell:
+         sc query MySQL80          -> STATE: RUNNING
+         tasklist | findstr mysqld -> the mysqld.exe process id
+  2. The port: netstat -ano | findstr 3306 shows mysqld LISTENING on 3306
+     and the app's connections as 127.0.0.1 -> 127.0.0.1. 127.0.0.1 is the
+     loopback address -- traffic that never leaves this machine. The
+     ESTABLISHED lines ARE the Node connection pool talking to MySQL.
+  3. The files: the data lives on this disk at
+         C:\ProgramData\MySQL\MySQL Server 8.0\Data\   (the datadir,
+         shown by: SELECT @@datadir;)
+     Each table is a file on disk (muj_sms\enrollments.ibd etc.), plus the
+     InnoDB redo log files (ib_logfile0/1) that make COMMIT durable and
+     the .err file that logs server events. Sort that folder by date
+     modified, enroll a student, and the files' timestamps change in front
+     of you -- the update physically happened on this disk.
+  4. An independent client: C:\Program Files\MySQL\MySQL Server 8.0\bin\
+     mysql.exe -h127.0.0.1 -uroot -p -e "USE muj_sms; SELECT enrollment_id,
+     status FROM enrollments;" -- the native MySQL console, with my Node
+     app closed out of the picture, reads the same committed rows from
+     disk.
+  5. The offline test: turn off Wi-Fi (airplane mode), reload the page --
+     everything still works, because browser, Node and MySQL all sit on
+     this one laptop. A cloud database would have gone blank.
+  Also: 127.0.0.1 vs localhost is the same thing -- the loopback
+  interface of this machine; no router, no internet, no external server
+  involved. If the teacher wants it from another device on the LAN, that
+  takes a deliberate netsh portproxy rule -- which only proves it was
+  local before.
+
 ========================================================================
 F. CHANGELOG
 ========================================================================
@@ -1402,6 +1435,11 @@ F. CHANGELOG
   (trace + flash + trigger rows + raw SQL + general log), the complete list
   of plugins/extensions (three npm packages, none else), and why no ORM or
   frontend framework was used.
+- Added viva Q&A Q16 (doc-only): how to prove on the machine that MySQL
+  is local -- the MySQL80 service, netstat loopback evidence, the datadir
+  on C:\ with per-table .ibd files whose timestamps change on every write,
+  the native mysql.exe console as an independent client, and the Wi-Fi-off
+  test.
 - Added section B11 to PROJECT_EXPLAINED.txt (doc-only): the complete
   schema.sql explained line by line -- DROP/CREATE DATABASE/USE, every
   column of all 10 tables (types, UNSIGNED, CHAR vs VARCHAR, ENUM,
